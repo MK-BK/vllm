@@ -304,6 +304,7 @@ fn content_is_empty(content: &ChatContent) -> bool {
         ChatContent::Parts(parts) => parts.iter().all(|part| match part {
             ChatContentPart::Text { text } => text.is_empty(),
             ChatContentPart::ImageUrl { .. }
+            | ChatContentPart::ImageEmbeds { .. }
             | ChatContentPart::VideoUrl { .. }
             | ChatContentPart::InputAudio { .. }
             | ChatContentPart::AudioUrl { .. } => false,
@@ -501,6 +502,9 @@ fn write_content(
                     ChatContentPart::Text { text } => write_text_with_images(out, text)?,
                     ChatContentPart::ImageUrl { .. } => {
                         out.image(message_index, content_part_index)?;
+                    }
+                    ChatContentPart::ImageEmbeds { .. } => {
+                        out.control(IMAGE_PLACEHOLDER)?
                     }
                     ChatContentPart::VideoUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("video_url"));
