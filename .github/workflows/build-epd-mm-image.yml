@@ -30,6 +30,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -39,6 +46,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:epd-mm-fix
+            ${{ secrets.ALIYUN_REGISTRY }}/images_dev/vllm:epd-mm-fix
           build-args: |
             torch_cuda_arch_list=9.0a
           cache-from: type=gha
