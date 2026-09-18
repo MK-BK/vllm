@@ -45,7 +45,7 @@ jobs:
           target: vllm-openai
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:epd-mm-fix
+            ghcr.io/mk-bk/vllm:epd-mm-fix
             ${{ secrets.ALIYUN_REGISTRY }}/images_dev/vllm:epd-mm-fix
           build-args: |
             torch_cuda_arch_list=9.0a
