@@ -835,20 +835,30 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
-        if boundary_tokens % self.block_size == 0:
-            return
 
         blocks = self.req_to_blocks[request.request_id]
-        block_idx = boundary_tokens // self.block_size
-        if block_idx >= len(blocks):
-            return
-        self.block_pool.cache_partial_block(
-            request=request,
-            block=blocks[block_idx],
-            num_tokens=boundary_tokens,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_size=self.block_size,
-        )
+        # The prompt's final hash boundary plus, under the EAGLE block drop,
+        # the one/two units below it: the drop lowers the reconciled candidate
+        # one unit, and hash-aligned prompts additionally lose the boundary
+        # node itself to the mandatory last-token recompute (max hit =
+        # prompt - 1). Register all reachable boundary positions; KV is
+        # position-addressable so no chunk-end stop is needed for them.
+        for offset in (0, -hash_block_size, -2 * hash_block_size):
+            pos = boundary_tokens + offset
+            if pos <= 0 or pos > num_tokens:
+                continue
+            if pos % self.block_size == 0:
+                continue
+            block_idx = pos // self.block_size
+            if block_idx >= len(blocks):
+                continue
+            self.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=pos,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1479,6 +1489,19 @@ class MambaManager(SingleTypeKVCacheManager):
             max_num_partial_units = min(
                 max_length // hash_block_size, len(block_hashes)
             )
+            if not getattr(block_pool, "_fine_entry_logged", False):
+                block_pool._fine_entry_logged = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "STKM fine loop ENTRY: alignment=%d block_size=%d "
+                    "max_length=%d len(bh)=%d max_units=%d",
+                    alignment_tokens,
+                    block_size,
+                    max_length,
+                    len(block_hashes),
+                    max_num_partial_units,
+                )
             for fine_idx in range(max_num_partial_units - 1, -1, -1):
                 num_tokens = (fine_idx + 1) * hash_block_size
                 block_hash = block_hashes[fine_idx]
@@ -1490,6 +1513,17 @@ class MambaManager(SingleTypeKVCacheManager):
                         computed.extend([block_pool.null_block] * block_idx)
                         computed.append(cached)
                     hit_length = num_tokens
+                    if not getattr(block_pool, "_mamba_lookup_logged", False):
+                        block_pool._mamba_lookup_logged = True
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "STKM fine lookup HIT: fine_idx=%d tokens=%d "
+                            "block_idx=%d",
+                            fine_idx,
+                            num_tokens,
+                            block_idx,
+                        )
                     break
             return computed_blocks, hit_length
 
@@ -1713,12 +1747,44 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.block_pool.hash_block_size,
                 self.drop_eagle_checkpoint_block,
             )
+            if not getattr(self, "_ckpt_alloc_logged", False):
+                self._ckpt_alloc_logged = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "STKM alloc: req=%s num_tokens=%d total_computed=%d "
+                    "ckpt_pos=%d has_ckpt_blocks=%s",
+                    request_id[:14],
+                    num_tokens,
+                    total_computed_tokens,
+                    checkpoint_position,
+                    self.has_prefill_checkpoint_blocks,
+                )
             if not self._needs_internal_checkpoint(
                 request_id,
                 total_computed_tokens,
                 num_tokens,
                 checkpoint_position,
             ):
+                if checkpoint_position > 0 and not getattr(
+                    self, "_ckpt_reject_logged", False
+                ):
+                    self._ckpt_reject_logged = True
+                    import logging
+
+                    blocks_now = self.req_to_blocks.get(request_id, ())
+                    logging.getLogger(__name__).warning(
+                        "STKM ckpt REJECTED: req=%s pos=%d qs=%d qe=%d "
+                        "idx=%d len(blocks)=%d spec_blocks=%d allocated=%s",
+                        request_id[:14],
+                        checkpoint_position,
+                        total_computed_tokens,
+                        num_tokens,
+                        cdiv(num_tokens, self.block_size) - 2,
+                        len(blocks_now),
+                        self.num_speculative_blocks,
+                        request_id in self._allocated_block_reqs,
+                    )
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
             if not apply_admission_cap:
@@ -1968,6 +2034,20 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
+        if not getattr(self, "_ptail_logged", False):
+            self._ptail_logged = True
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "STKM ptail: req=%s num_tokens=%d hash_bs=%d block_bs=%d "
+                "prompt=%d ckpt=%s",
+                request.request_id[:14],
+                num_tokens,
+                hash_block_size,
+                self.block_size,
+                request.num_prompt_tokens,
+                self._checkpoints.get(request.request_id),
+            )
         # Re-key the reserved block at its exported checkpoint boundary.
         checkpoint = self._checkpoints.get(request.request_id)
         if checkpoint is not None:
@@ -1975,6 +2055,18 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            if not getattr(self, "_rekey_logged", False):
+                self._rekey_logged = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "STKM rekey: req=%s pos=%d idx=%d "
+                    "block_hash_num_tokens=%s",
+                    request.request_id[:14],
+                    checkpoint_position,
+                    checkpoint_idx,
+                    checkpoint_block.block_hash_num_tokens,
+                )
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
             return self.block_pool.cache_partial_block(
@@ -1995,11 +2087,35 @@ class MambaManager(SingleTypeKVCacheManager):
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
         if num_tokens != latest_prompt_hash_boundary:
-            return None
+            # Under the EAGLE block drop the reconciled hit candidate lands
+            # one hash unit below the prompt's last hash boundary (and, for
+            # hash-aligned prompts, one more below that: the boundary node
+            # itself is lost to the mandatory last-token recompute). The
+            # scheduler stops chunks at those positions as well; accept them
+            # here so their states (matching the chunk ends by construction)
+            # get registered.
+            if not (
+                self.num_speculative_blocks > 0
+                and num_tokens
+                in (
+                    latest_prompt_hash_boundary - hash_block_size,
+                    latest_prompt_hash_boundary - 2 * hash_block_size,
+                )
+            ):
+                return None
 
         block_idx = num_tokens // self.block_size
         blocks = self.req_to_blocks[request.request_id]
         if block_idx >= len(blocks):
+            if not getattr(self, "_ptail_nolog", False):
+                self._ptail_nolog = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "STKM ptail plain: block_idx(%d) >= len(blocks)(%d) — skip",
+                    block_idx,
+                    len(blocks),
+                )
             return None
         source_block = blocks[block_idx]
         if source_block.is_null:
@@ -2013,6 +2129,17 @@ class MambaManager(SingleTypeKVCacheManager):
             block_size=self.block_size,
         )
         if partial_hash is not None:
+            if not getattr(self, "_ptail_reg_logged", False):
+                self._ptail_reg_logged = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "STKM ptail plain REGISTERED: req=%s num_tokens=%d "
+                    "block_idx=%d",
+                    request.request_id[:14],
+                    num_tokens,
+                    block_idx,
+                )
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
             # Producer of this partial tail: the boundary state currently lives
