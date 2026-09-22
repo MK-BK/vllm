@@ -1250,9 +1250,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens //= self.compress_ratio
                 else:
                     # Copy to avoid mutating shared state; keeps CG address stable.
+                    # _prepare_decode_tensors' variable-length path returns a
+                    # [num_decode_tokens] view (token-padded; padding rows are
+                    # zeroed). Slice to the real [num_decodes] rows so the
+                    # assignment matches when the draft batch carries padding.
                     self.expanded_seq_lens_buffer[:num_decodes] = (
                         seq_lens // self.compress_ratio
-                    )
+                    )[:num_decodes]
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
