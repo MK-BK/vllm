@@ -12,30 +12,41 @@ on:
         description: "destination image tag"
         required: true
 
-permissions:
-  packages: write
-  contents: read
+env:
+  REGISTRY: crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com
+  NAMESPACE: images_dev
+  IMAGE_NAME: wheel-transfer
 
 jobs:
   transfer:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
       - name: Download wheel
         run: |
-          curl -sSL --retry 5 -o "${{ inputs.wheel_file }}" "${{ inputs.wheel_url }}"
-          ls -la "${{ inputs.wheel_file }}"
-          sha256sum "${{ inputs.wheel_file }}"
+          mkdir -p transfer
+          curl -sSL --retry 5 -o "transfer/${{ inputs.wheel_file }}" "${{ inputs.wheel_url }}"
+          ls -la transfer/
+          sha256sum "transfer/${{ inputs.wheel_file }}"
+          echo "FROM alpine:3" > transfer/Dockerfile
+          echo "COPY ${{ inputs.wheel_file }} /wheel/" >> transfer/Dockerfile
 
-      - name: Build and push to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u MK-BK --password-stdin
-          echo "FROM alpine:3" > Dockerfile
-          echo "COPY ${{ inputs.wheel_file }} /wheel/" >> Dockerfile
-          docker build -t ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }} .
-          docker push ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build and push to Aliyun ACR
-        run: |
-          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com -u "${{ secrets.ALIYUN_USERNAME }}" --password-stdin
-          docker tag ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }} crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com/images_dev/wheel-transfer:${{ inputs.tag }}
-          docker push crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com/images_dev/wheel-transfer:${{ inputs.tag }}
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./transfer
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ inputs.tag }}
+          provenance: false
