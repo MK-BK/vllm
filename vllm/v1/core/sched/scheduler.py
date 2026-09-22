@@ -3049,7 +3049,25 @@ class Scheduler(SchedulerInterface):
             marked_invalid_block = False
             req_id = request.request_id
             # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            all_req_block_ids = self.kv_cache_manager.get_block_ids(req_id)
+            if len(all_req_block_ids) > 1:
+                # Hybrid (multi-group) allocator: per-group block ids have
+                # different granularities; fall back to whole-request
+                # recompute when any group block is invalid (conservative:
+                # recompute more, never less).
+                flat_block_ids = [b for grp in all_req_block_ids for b in grp]
+                if any(b in invalid_block_ids for b in flat_block_ids):
+                    req_num_computed_now = (
+                        request.num_computed_tokens
+                        - num_scheduled_tokens.get(req_id, 0)
+                    )
+                    request.num_computed_tokens = 0
+                    total_affected_tokens += req_num_computed_now
+                    if evict_blocks:
+                        blocks_to_evict.update(flat_block_ids)
+                    affected_req_ids.add(request.request_id)
+                continue
+            (req_block_ids,) = all_req_block_ids
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
