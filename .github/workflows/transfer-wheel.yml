@@ -1,0 +1,41 @@
+name: transfer-wheel
+on:
+  workflow_dispatch:
+    inputs:
+      wheel_url:
+        description: "wheel download URL"
+        required: true
+      wheel_file:
+        description: "wheel filename"
+        required: true
+      tag:
+        description: "destination image tag"
+        required: true
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download wheel
+        run: |
+          curl -sSL --retry 5 -o "${{ inputs.wheel_file }}" "${{ inputs.wheel_url }}"
+          ls -la "${{ inputs.wheel_file }}"
+          sha256sum "${{ inputs.wheel_file }}"
+
+      - name: Build and push to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u MK-BK --password-stdin
+          echo "FROM alpine:3" > Dockerfile
+          echo "COPY ${{ inputs.wheel_file }} /wheel/" >> Dockerfile
+          docker build -t ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }} .
+          docker push ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }}
+
+      - name: Build and push to Aliyun ACR
+        run: |
+          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com -u "${{ secrets.ALIYUN_USERNAME }}" --password-stdin
+          docker tag ghcr.io/mk-bk/wheel-transfer:${{ inputs.tag }} crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com/images_dev/wheel-transfer:${{ inputs.tag }}
+          docker push crpi-pweus896l7j9p1b9.cn-hangzhou.personal.cr.aliyuncs.com/images_dev/wheel-transfer:${{ inputs.tag }}
