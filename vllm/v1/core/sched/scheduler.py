@@ -475,6 +475,29 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
         )
+        # Under the EAGLE block drop the reconciled hit candidate lands one
+        # hash unit below the tail boundary, so a Mamba partial-tail node
+        # keyed at the boundary itself is unreachable. Stop one hash unit
+        # early as well so a state also exists at the reachable position.
+        # Short prompts only (< 2 blocks): these have no internal-checkpoint
+        # channel at all. Long prompts keep the upstream tail-boundary stop —
+        # the extra mid-block stop on long prompts crashes the draft
+        # speculator's indexer metadata build under concurrent mixed batches.
+        # Hash-aligned prompts (prompt % hash == 0) additionally lose the
+        # boundary node itself to the mandatory last-token recompute
+        # (max hit = prompt - 1), pushing the reachable chain one more unit
+        # down; stop there as well.
+        _eagle_short = (
+            self.use_eagle_block_drop
+            and tail_boundary > 0
+            and tail_boundary < 2 * block_size
+        )
+        eagle_tail_boundary = (
+            tail_boundary - self.hash_block_size if _eagle_short else 0
+        )
+        eagle_tail_boundary2 = (
+            tail_boundary - 2 * self.hash_block_size if _eagle_short else 0
+        )
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -487,6 +510,16 @@ class Scheduler(SchedulerInterface):
             # registered by a chunk ending exactly at its last hash boundary.
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
+            else 0,
+            # Fine-grained hits under the EAGLE drop: the reachable partial
+            # tail position is one hash unit below the last hash boundary.
+            eagle_tail_boundary
+            if last_cache_position < eagle_tail_boundary < request.num_prompt_tokens
+            else 0,
+            # Hash-aligned prompts: one more unit below (the boundary node
+            # itself is lost to the mandatory last-token recompute).
+            eagle_tail_boundary2
+            if last_cache_position < eagle_tail_boundary2 < request.num_prompt_tokens
             else 0,
             # Marconi shared-prefix junction, block-floored (a sub-block
             # junction's state is not separately cacheable): cache its state
