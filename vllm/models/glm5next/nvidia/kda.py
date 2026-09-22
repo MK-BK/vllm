@@ -37,6 +37,11 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.worker.workspace import current_workspace_manager
+
+import triton
+from dataclasses import replace
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -150,6 +155,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
+        )
+
+    def get_attn_backend(self):
+        # Prototype: reuse Kimi K3's KDA attention backend so GLM gets the
+        # checkpoint-aware metadata builder (KimiK3KDAMetadata carries
+        # KDACheckpointMetadata with per-seq offsets + state indices).
+        from vllm.models.kimi_k3.nvidia.kda_metadata import (
+            KimiK3KDAAttentionBackend,
+        )
+
+        return KimiK3KDAAttentionBackend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+        spec = super().get_kv_cache_spec(vllm_config)
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=16,
         )
 
     def __init__(
@@ -282,6 +305,31 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
 
+        # --- flashkda checkpoint prototype (ported from kimi_k3) ---
+        self.kda_prefill_backend = "flashkda"
+        import vllm._flashkda_C  # noqa: F401
+
+        t_max = vllm_config.scheduler_config.max_num_batched_tokens
+        n_max = vllm_config.scheduler_config.max_num_seqs
+        workspace_size = torch.ops._flashkda_C.get_workspace_size(
+            t_max, self.local_num_heads, n_max
+        )
+        self._flashkda_buffer_specs = (
+            (
+                (1, t_max, self.local_num_heads, self.head_dim),
+                vllm_config.model_config.dtype,
+            ),
+            (
+                (n_max, self.local_num_heads, self.head_dim, self.head_dim),
+                self.get_state_dtype()[1],
+            ),
+            (
+                (n_max, self.local_num_heads, self.head_dim, self.head_dim),
+                self.get_state_dtype()[1],
+            ),
+            ((workspace_size,), torch.uint8),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -364,7 +412,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata_narrowed.non_spec_token_indx
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
-        use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        # Kimi's metadata builder always reports spec_sequence_masks=None and
+        # signals spec steps via num_spec_decodes alone.
+        use_spec = num_spec_decodes > 0
         # Safe-gate checkpoints use the bounded sigmoid variant.
         safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound
@@ -451,8 +501,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
         q_ns = k_ns = v_ns = None
+        mixed_pre_conv = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
+            # Keep the pre-conv projections alive: the checkpoint store kernel
+            # reads the conv history from them (mirrors kimi_k3 mixed_qkv_ns).
+            mixed_pre_conv = qkv_ns
             qkv_ns = causal_conv1d_fn(
                 qkv_ns.transpose(0, 1),
                 conv_weights,
@@ -533,35 +587,143 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state = gather_initial_states(
                 recurrent_state, non_spec_state_indices_tensor, has_initial_state
             )
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_kda_with_fused_gate(
-                q=_rearr(q_ns),
-                k=_rearr(k_ns),
-                v=_rearr(v_ns),
-                raw_g=g1_ns,
-                # Chunk path wants the pre-sigmoided fp32 beta (its kernels
-                # don't sigmoid); beta_ns is raw bf16 from forward.
-                beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
-                A_log=self.A_log,
-                g_bias=self.dt_bias,
-                initial_state=initial_state,
-                output_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc,
-                safe_gate=safe_gate,
-                lower_bound=lower_bound,
+            # --- flashkda checkpoint prototype (ported from kimi_k3) ---
+            from vllm.models.kimi_k3.nvidia.kda import (
+                _flashkda_prefill,
+                _store_cache_checkpoints_kernel,
             )
-            # Init cache
-            scatter_states(
-                recurrent_state,
-                last_recurrent_state,
-                non_spec_state_indices_tensor,
+
+            checkpoint = getattr(attn_metadata_narrowed, "checkpoint", None)
+            (
+                workspace_out,
+                final_state,
+                checkpoint_state,
+                workspace,
+            ) = current_workspace_manager().get_simultaneous(
+                *self._flashkda_buffer_specs
+            )
+            # GLM q_ns is [n, proj] (2-D); Kimi's is [1, n, h, d]. Token count
+            # is therefore shape[0] here.
+            flashkda_out = (workspace_out if use_spec else core_attn_out)[
+                :, : q_ns.shape[0]
+            ]
+            if checkpoint is not None and mixed_pre_conv is not None:
+                num_sequences = initial_state.shape[0]
+                assert checkpoint.checkpoint_offsets.shape == (num_sequences,)
+                if not getattr(self, "_ckpt_logged", False):
+                    self._ckpt_logged = True
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "GLM KDA checkpoint ACTIVE: seqs=%d offsets=%s "
+                        "state_indices=%s",
+                        num_sequences,
+                        checkpoint.checkpoint_offsets.tolist()[:8],
+                        checkpoint.state_indices.tolist()[:8],
+                    )
+                final_state = final_state[:num_sequences]
+                checkpoint_state = checkpoint_state[:num_sequences]
+                checkpoint_offsets = checkpoint.checkpoint_offsets
+                _flashkda_prefill(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    g=g1_ns,
+                    beta=beta_ns,
+                    # flashkda expects Kimi's flat [H] A_log; GLM keeps 4-D.
+                    A_log=self.A_log.view(-1),
+                    dt_bias=self.dt_bias,
+                    lower_bound=lower_bound,
+                    initial_state=initial_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                    out=flashkda_out,
+                    final_state=final_state,
+                    workspace=workspace,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
+                )
+                core_attn_out_non_spec = flashkda_out
+                last_recurrent_state = final_state
+                state_len = conv_state.shape[-1]
+                width = mixed_pre_conv.shape[-1]
+                recurrent_row_size = checkpoint_state[0].numel()
+                block_size = 256
+                _store_cache_checkpoints_kernel[
+                    (
+                        checkpoint_offsets.numel(),
+                        triton.cdiv(
+                            max(width * state_len, recurrent_row_size),
+                            block_size,
+                        ),
+                    )
+                ](
+                    mixed_pre_conv,
+                    conv_state,
+                    checkpoint_state,
+                    recurrent_state,
+                    non_spec_query_start_loc,
+                    checkpoint_offsets,
+                    checkpoint.state_indices,
+                    mixed_pre_conv.stride(0),
+                    mixed_pre_conv.stride(1),
+                    conv_state.stride(0),
+                    conv_state.stride(1),
+                    conv_state.stride(2),
+                    checkpoint_state.stride(0),
+                    recurrent_state.stride(0),
+                    checkpoint_offsets.stride(0),
+                    state_len,
+                    width,
+                    recurrent_row_size,
+                    NULL_BLOCK_ID,
+                    block_size,
+                )
+            else:
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = _flashkda_prefill(
+                    q=_rearr(q_ns),
+                    k=_rearr(k_ns),
+                    v=_rearr(v_ns),
+                    g=g1_ns,
+                    beta=beta_ns,
+                    A_log=self.A_log.view(-1),
+                    dt_bias=self.dt_bias,
+                    lower_bound=lower_bound,
+                    initial_state=initial_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                    out=flashkda_out,
+                    final_state=final_state[: initial_state.shape[0]],
+                    workspace=workspace,
+                )
+            # Init cache (flashkda wrote final_state into a workspace buffer).
+            recurrent_state[non_spec_state_indices_tensor] = (
+                last_recurrent_state.to(recurrent_state.dtype)
             )
         elif attn_metadata_narrowed.num_decodes > 0:
-            assert non_spec_query_start_loc is not None
-            assert non_spec_state_indices_tensor is not None
+            if non_spec_state_indices_tensor is None:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "GLM KDA decode step without state indices: "
+                    "tokens=%d prefills=%d decodes=%d spec=%s",
+                    num_actual_tokens,
+                    attn_metadata_narrowed.num_prefills,
+                    attn_metadata_narrowed.num_decodes,
+                    use_spec,
+                )
+                return
+            if non_spec_query_start_loc is None:
+                # Kimi's builder uses a packed layout for mixed spec +
+                # plain-decode steps: one row per request, no cu_seqlens
+                # (its packed decode kernel consumes rows directly). Every
+                # packed row is exactly one token, so cu_seqlens == arange.
+                non_spec_query_start_loc = torch.arange(
+                    attn_metadata_narrowed.num_decodes + 1,
+                    dtype=torch.int32,
+                    device=recurrent_state.device,
+                )
             # Plain decode step (no spec tokens): token order is dense, so the
             # kernel can write straight into the layer output buffer. A mixed
             # step scatters non-spec output via non_spec_token_indx instead.
@@ -604,7 +766,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if spec_out is None:
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
-            assert core_attn_out_non_spec is not None
+            if core_attn_out_non_spec is None:
+                # Kimi's builder emits metadata entries even for steps with no
+                # runnable tokens for this layer (warmup dummy batches). Log
+                # and skip instead of crashing.
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "GLM KDA empty step: tokens=%d prefills=%d decodes=%d "
+                    "spec=%s",
+                    num_actual_tokens,
+                    attn_metadata_narrowed.num_prefills,
+                    attn_metadata_narrowed.num_decodes,
+                    use_spec,
+                )
+                return
             if ns_out is None:
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
                     0, :num_actual_tokens
