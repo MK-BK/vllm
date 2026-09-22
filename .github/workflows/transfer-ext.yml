@@ -1,0 +1,63 @@
+name: transfer-ext-src
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Clone external sources
+        run: |
+          mkdir -p ext
+          git clone -q --depth 1 --branch v4.4.2 --recurse-submodules --shallow-submodules https://github.com/nvidia/cutlass.git ext/cutlass
+          git clone -q --depth 1 --recurse-submodules --shallow-submodules https://github.com/deepseek-ai/DeepGEMM.git ext/deepgemm-full
+          cd ext/deepgemm-full && git fetch -q --depth 1 origin 8b1392b978f5a03c828dd1711090d7fb50958b8a && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/deepgemm-full ext/deepgemm
+          git clone -q --depth 1 https://github.com/vllm-project/FlashKDA.git ext/flashkda-full
+          cd ext/flashkda-full && git fetch -q --depth 1 origin ee0be888cd0e972f9409bf53756f8c38c6652173 && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/flashkda-full ext/flashkda
+          git clone -q --depth 1 https://github.com/vllm-project/FlashMLA ext/flashmla-full
+          cd ext/flashmla-full && git fetch -q --depth 1 origin 6bc49418c5ead572ff0339191ddf3b155749e183 && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/flashmla-full ext/flashmla
+          git clone -q --depth 1 https://github.com/vllm-project/MSA.git ext/fmha_sm100-full
+          cd ext/fmha_sm100-full && git fetch -q --depth 1 origin 087c161814d4d9c735b46c21212a09e5f8eb92fa && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/fmha_sm100-full ext/fmha_sm100
+          git clone -q --depth 1 https://github.com/IST-DASLab/qutlass.git ext/qutlass-full
+          cd ext/qutlass-full && git fetch -q --depth 1 origin e74319e3405ce6d71965732880f5dc1f52371f64 && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/qutlass-full ext/qutlass
+          git clone -q --depth 1 https://github.com/vllm-project/tml-fa4.git ext/tml_fa4-full
+          cd ext/tml_fa4-full && git fetch -q --depth 1 origin b206834606ed5b5f21f8eed6b0683f528ea9cf7d && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/tml_fa4-full ext/tml_fa4
+          git clone -q --depth 1 https://github.com/vllm-project/flash-attention.git ext/flash_attn-full
+          cd ext/flash_attn-full && git fetch -q --depth 1 origin 06bdd47c0d0383daf6a2ff0c418faff9c6da16e5 && git checkout -q FETCH_HEAD && cd ../..
+          mv ext/flash_attn-full ext/flash_attn
+          git clone -q --depth 1 --branch v3.5.1 https://github.com/triton-lang/triton.git ext/triton
+          du -sh ext/*
+          echo "FROM alpine:3" > Dockerfile
+          echo "COPY ext /ext/" >> Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: MK-BK
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/mk-bk/ext-src:v1
+          provenance: false
