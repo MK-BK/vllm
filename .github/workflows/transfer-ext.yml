@@ -30,14 +30,14 @@ jobs:
             cd ../..
           }
 
-          git clone -q --depth 1 --branch v4.4.2 --recurse-submodules --shallow-submodules https://github.com/nvidia/cutlass.git ext/cutlass
-          clone_hash deepgemm https://github.com/deepseek-ai/DeepGEMM.git 8b1392b978f5a03c828dd1711090d7fb50958b8a
-          clone_hash flashkda https://github.com/vllm-project/FlashKDA.git ee0be888cd0e972f9409bf53756f8c38c6652173
-          clone_hash flashmla https://github.com/vllm-project/FlashMLA 6bc49418c5ead572ff0339191ddf3b155749e183
-          clone_hash fmha_sm100 https://github.com/vllm-project/MSA.git 087c161814d4d9c735b46c21212a09e5f8eb92fa
+          git clone -q --depth 1 --branch v4.7.1 --recurse-submodules --shallow-submodules https://github.com/nvidia/cutlass.git ext/cutlass
+          clone_hash deepgemm https://github.com/deepseek-ai/DeepGEMM.git e1f418c2a4f20818221f6b0e578b4c2f634d4c3f
+          clone_hash flashkda https://github.com/vllm-project/FlashKDA.git b59532f1f464fbd536272780e30df5bf6a2ccc02
+          clone_hash flashmla https://github.com/vllm-project/FlashMLA 0eee43b12f034b657133cf2afca6a72ebb6efccf
+          clone_hash fmha_sm100 https://github.com/vllm-project/MSA.git f355c37eb4e1413f21ee2ad8bbad25079e6bef9d
           clone_hash qutlass https://github.com/IST-DASLab/qutlass.git e74319e3405ce6d71965732880f5dc1f52371f64
-          clone_hash tml_fa4 https://github.com/vllm-project/tml-fa4.git b206834606ed5b5f21f8eed6b0683f528ea9cf7d
-          clone_hash flash_attn https://github.com/vllm-project/flash-attention.git 06bdd47c0d0383daf6a2ff0c418faff9c6da16e5
+          clone_hash tml_fa4 https://github.com/vllm-project/tml-fa4.git 75765e76a9c2c012c1f6ecd64577eb646eb4d303
+          clone_hash flash_attn https://github.com/vllm-project/flash-attention.git 506341a143fcabd4bb79052a7605ada727d6b3f5
           git clone -q --depth 1 --branch v3.5.1 --recurse-submodules --shallow-submodules https://github.com/triton-lang/triton.git ext/triton
           du -sh ext/*
           echo "FROM alpine:3" > Dockerfile
@@ -58,5 +58,5 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/mk-bk/ext-src:v2
+          tags: ghcr.io/mk-bk/ext-src:v30
           provenance: false
