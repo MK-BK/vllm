@@ -586,7 +586,6 @@ pub(crate) async fn finalize_rendered_prompt(
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
 
-<<<<<<< HEAD
 /// Resolve media parts in the placeholder order reported by the renderer.
 fn extract_media_parts(
     request: &ChatRequest,
@@ -608,60 +607,6 @@ fn extract_media_parts(
                 | ChatMessage::ToolResponse { content, .. } => content,
                 ChatMessage::Assistant { .. } => {
                     bail_multimodal!("renderer reported multimodal assistant content")
-=======
-/// Extract media parts from chat messages in message/content order.
-///
-/// Assistant history is skipped because generated assistant blocks are already
-/// represented as text for prompt rendering in this crate.
-fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
-    let mut all_parts = Vec::new();
-    for message in &request.messages {
-        let content = match message {
-            ChatMessage::System { content }
-            | ChatMessage::Developer { content, .. }
-            | ChatMessage::User { content }
-            | ChatMessage::ToolResponse { content, .. } => content,
-            ChatMessage::Assistant { .. } => continue,
-        };
-        let ChatContent::Parts(parts) = content else {
-            continue;
-        };
-        for part in parts {
-            match part {
-                ChatContentPart::Text { .. } => {}
-                ChatContentPart::ImageUrl {
-                    image_url,
-                    detail,
-                    uuid,
-                } => all_parts.push(MediaContentPart::ImageUrl {
-                    url: image_url.clone(),
-                    detail: *detail,
-                    uuid: uuid.clone(),
-                }),
-                ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
-                    all_parts.push(MediaContentPart::ImageEmbeds {
-                        payload: image_embeds.clone(),
-                        uuid: Some(uuid.clone()),
-                    })
-                }
-                ChatContentPart::VideoUrl { video_url, uuid } => {
-                    all_parts.push(MediaContentPart::VideoUrl {
-                        url: video_url.clone(),
-                        uuid: uuid.clone(),
-                    })
-                }
-                ChatContentPart::InputAudio { data, format, uuid } => {
-                    all_parts.push(MediaContentPart::AudioUrl {
-                        url: input_audio_data_url(data, format.as_deref())?,
-                        uuid: uuid.clone(),
-                    })
-                }
-                ChatContentPart::AudioUrl { audio_url, uuid } => {
-                    all_parts.push(MediaContentPart::AudioUrl {
-                        url: audio_url.clone(),
-                        uuid: uuid.clone(),
-                    })
->>>>>>> 2239f6f9f8 ([Frontend][EPD] Use shared metadata-only image interface)
                 }
             };
             let ChatContent::Parts(parts) = content else {
