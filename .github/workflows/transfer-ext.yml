@@ -1,0 +1,62 @@
+name: transfer-ext-src
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Clone external sources
+        run: |
+          set -e
+          mkdir -p ext
+
+          clone_hash() {
+            local name=$1 url=$2 hash=$3
+            git init -q ext/$name
+            cd ext/$name
+            git remote add origin "$url"
+            git fetch -q --depth 1 origin "$hash"
+            git checkout -q FETCH_HEAD
+            git submodule update -q --init --recursive --depth 1 || git submodule update --init --recursive
+            cd ../..
+          }
+
+          git clone -q --depth 1 --branch v4.4.2 --recurse-submodules --shallow-submodules https://github.com/nvidia/cutlass.git ext/cutlass
+          clone_hash deepgemm https://github.com/deepseek-ai/DeepGEMM.git 8b1392b978f5a03c828dd1711090d7fb50958b8a
+          clone_hash flashkda https://github.com/vllm-project/FlashKDA.git ee0be888cd0e972f9409bf53756f8c38c6652173
+          clone_hash flashmla https://github.com/vllm-project/FlashMLA 6bc49418c5ead572ff0339191ddf3b155749e183
+          clone_hash fmha_sm100 https://github.com/vllm-project/MSA.git 087c161814d4d9c735b46c21212a09e5f8eb92fa
+          clone_hash qutlass https://github.com/IST-DASLab/qutlass.git e74319e3405ce6d71965732880f5dc1f52371f64
+          clone_hash tml_fa4 https://github.com/vllm-project/tml-fa4.git b206834606ed5b5f21f8eed6b0683f528ea9cf7d
+          clone_hash flash_attn https://github.com/vllm-project/flash-attention.git 06bdd47c0d0383daf6a2ff0c418faff9c6da16e5
+          git clone -q --depth 1 --branch v3.5.1 --recurse-submodules --shallow-submodules https://github.com/triton-lang/triton.git ext/triton
+          du -sh ext/*
+          echo "FROM alpine:3" > Dockerfile
+          echo "COPY ext /ext/" >> Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: MK-BK
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/mk-bk/ext-src:v2
+          provenance: false
