@@ -653,6 +653,12 @@ fn extract_media_parts(
                 detail: *detail,
                 uuid: uuid.clone(),
             }),
+            ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
+                Ok(MediaContentPart::ImageEmbeds {
+                    payload: image_embeds.clone(),
+                    uuid: Some(uuid.clone()),
+                })
+            }
             ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
                 url: video_url.clone(),
                 uuid: uuid.clone(),
